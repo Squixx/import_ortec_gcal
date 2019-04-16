@@ -29,7 +29,7 @@ url =  # URL to login portal, string
 calendarId =  # fill with string
 ## notification in minutes
 downloadDir = r'D:\dev\ortec_downloads'
-downloadedFile = r'D:/dev/ortec_downloads/Employee Schedule ESS.csv' # Filname could be static
+downloadedFile = r'D:/dev/ortec_downloads/Employee Schedule ESS.csv'
 chromeDriverPath = r'D:\dev\chromedriver.exe'
 notificationTime = 60
 sleep_time = 2
@@ -41,7 +41,8 @@ chrome_options = webdriver.ChromeOptions()
 prefs = {'download.default_directory' : downloadDir}
 chrome_options.add_experimental_option('prefs', prefs)
 driver = webdriver.Chrome(chrome_options=chrome_options, executable_path=chromeDriverPath)
-
+## EventStore
+dedupWorkEvents = []
 
 ##gcal stuff
 def createEvent(payload):
@@ -69,7 +70,7 @@ def createEvent(payload):
 
     service = build('calendar', 'v3', credentials=creds)
     event = service.events().insert(calendarId=calendarId, body=payload).execute()
-    print(payload['summary'] +' ' + knownStartDate + ' created: %s' % (event.get('htmlLink')))
+    print(payload['summary'] +' ' + payload['start'].get('dateTime') + ' created: %s' % (event.get('htmlLink')))
 
 # checks if an event exists in gcal
 def checkEventExists(payload):
@@ -115,7 +116,7 @@ def checkEventExists(payload):
         return False
 
 
-def pushtoGoogle():
+def parseCSV():
     if os.path.exists(downloadedFile):
         workEvents = []
         with open(downloadedFile) as csv_file:
@@ -138,11 +139,11 @@ def pushtoGoogle():
                 else:
                     line_count += 1
 
-        dedupWorkEvents = []
         for event in workEvents:
             if event not in dedupWorkEvents:
                 dedupWorkEvents.append(event)
 
+def pushtoGoogle():
         for event in dedupWorkEvents:
             time = event.get("Time").split('-')
             startTime = time[0].strip()
@@ -173,6 +174,48 @@ def pushtoGoogle():
             if checkEventExists(payload) == False:
                 createEvent(payload)
 
+def checkRemovedEvents():
+    creds = None
+    # The file token.pickle stores the user's access and refresh tokens, and is
+    # created automatically when the authorization flow completes for the first
+    # time.
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    # If there are no (valid) credentials available, let the user log in.
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES)
+            creds = flow.run_local_server()
+        # Save the credentials for the next run
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    service = build('calendar', 'v3', credentials=creds)
+    formattedNow = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S+02:00")
+    events_result = service.events().list(calendarId=calendarId, timeMin=formattedNow,
+                                        maxResults=100, singleEvents=True,
+                                        orderBy='startTime').execute()
+    events = events_result.get('items', [])
+    knownEvent = False
+    if not events:
+        print('No upcoming events found.')
+    for event in events:
+        if event['summary'].startswith(name +" Dienst "):
+            isremoved = True
+            for knownEvent in dedupWorkEvents:
+                time = knownEvent.get("Time").split('-')
+                startTime = time[0].strip()
+                if event['summary'] == name +" Dienst " + knownEvent.get("Code") and \
+                event['start'].get('dateTime') == datetime.datetime.strptime(knownEvent.get("Date") + " " + startTime, '%m/%d/%Y %H:%M').strftime("%Y-%m-%dT%H:%M:%S+02:00"):
+                    print(event['summary'] +' '+ event['start'].get('dateTime') + ' still exists')
+                    isremoved = False
+            if isremoved:
+                event.update({'summary': ('REMOVED: '+ event['summary'])})
+                service.events().update(calendarId=calendarId, eventId=event['id'], body=event).execute()
+                print(event['summary'] +' '+ event['start'].get('dateTime') + ' is removed')
 ## set date vars
 todayStr = datetime.datetime.now().strftime("%m") + '/' + \
     datetime.datetime.now().strftime("%d") + '/' + \
@@ -245,8 +288,9 @@ for index in range(len(seq)):
         time.sleep(sleep_time)
 
     time.sleep(sleep_time)
-    pushtoGoogle()
+    parseCSV()
 
+    time.sleep(sleep_time)
     if os.path.exists(downloadedFile):
         os.remove(downloadedFile)
 
@@ -272,4 +316,7 @@ for index in range(len(seq)):
         sleep(sleep_time)
 
     sleep(sleep_time)
+    parseCSV()
     pushtoGoogle()
+    checkRemovedEvents()
+    print('succesfully updated calendar')
